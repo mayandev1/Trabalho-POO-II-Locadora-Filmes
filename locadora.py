@@ -1,4 +1,5 @@
 import sys
+import time
 from datetime import date, timedelta
 
 from PySide6.QtWidgets import (
@@ -8,33 +9,54 @@ from PySide6.QtWidgets import (
     QMessageBox, QToolBar, QStatusBar
 )
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtCore import Qt, QDate, Signal
+from PySide6.QtCore import Qt, QDate, Signal, QObject, QRunnable, QThreadPool
 
 # CONSTANTES
 
-# Colunas que a tabela do catalogo vai mostrar, nessa ordem.
 COLUNAS = ["Titulo", "Diretor", "Ano", "Genero", "Duracao", "Estoque", "Status"]
 
-# Lista fixa de generos disponiveis no combo box do formulario.
 GENEROS = [
-    "Acao",
-    "Comedia",
-    "Drama",
-    "Terror",
-    "Ficcao Cientifica",
-    "Animacao",
-    "Documentario",
-    "Romance",
+    "Acao", "Comedia", "Drama", "Terror",
+    "Ficcao Cientifica", "Animacao", "Documentario", "Romance",
 ]
 
 COLUNAS_CLIENTE = ["Nome", "CPF", "Telefone", "Email"]
 COLUNAS_LOCACAO = ["Filme", "Cliente", "Retirada", "Prevista", "Status"]
 
-# MODELOS (regras de negocio, sem nada de Qt)
+# ESTRUTURA PARA THREADING (QRunnable + QThreadPool)
+
+class WorkerSignals(QObject):
+    """Sinais Qt para comunicação segura da Thread secundária com a Thread principal."""
+    finished = Signal()
+    result = Signal(list)
+    error = Signal(str)
+
+class CarregarFilmesWorker(QRunnable):
+    """Tarefa em segundo plano que simula o carregamento demorado de dados."""
+    def __init__(self):
+        super().__init__()
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            # Simula uma tarefa demorada em paralelo (ex: busca na rede/banco)
+            time.sleep(3)
+            
+            novos_filmes = [
+                Filme("De Volta para o Futuro", "Robert Zemeckis", 1985, "Ficcao Cientifica", 116, 3),
+                Filme("O Iluminado", "Stanley Kubrick", 1980, "Terror", 146, 2),
+                Filme("Coringa", "Todd Phillips", 2019, "Drama", 122, 5),
+                Filme("Matrix", "Lana Wachowski, Lilly Wachowski", 1999, "Ficcao Cientifica", 136, 4),
+            ]
+            self.signals.result.emit(novos_filmes)
+        except Exception as e:
+            self.signals.error.emit(str(e))
+        finally:
+            self.signals.finished.emit()
+
+# MODELOS
 
 class Filme:
-    # Representa um filme cadastrado na locadora.
-
     def __init__(self, titulo, diretor, ano, genero, duracao_min, estoque):
         self.titulo = titulo
         self.diretor = diretor
@@ -45,11 +67,9 @@ class Filme:
 
     @property
     def status_disponibilidade(self):
-        # Status simples calculado a partir do estoque atual.
         return "Disponivel" if self.estoque > 0 else "Indisponivel"
 
     def para_linha_tabela(self):
-        # Devolve os dados do filme em uma lista de strings, na ordem certa para preencher uma linha da tabela da interface.
         return [
             self.titulo,
             self.diretor,
@@ -62,8 +82,6 @@ class Filme:
 
 
 class Cliente:
-    # Representa um cliente cadastrado na locadora.
-
     def __init__(self, nome, cpf, telefone, email=""):
         self.nome = nome
         self.cpf = cpf
@@ -75,8 +93,6 @@ class Cliente:
 
 
 class Locacao:
-    # Representa o aluguel de um filme para um cliente.
-
     VALOR_DIARIA_MULTA = 2.50
 
     def __init__(self, filme, cliente, data_prevista_devolucao=None):
@@ -114,14 +130,11 @@ class Locacao:
             status,
         ]
 
-# DIALOG DE CADASTRO/EDICAO DE FILME
+# DIALOGS
 
 class FilmeDialog(QDialog):
-    # Janela de dialogo (modal) para cadastrar ou editar um filme. Se um "filme" for passado no construtor, os campos ja vem preenchidos com os dados dele (modo edicao). Se nao, os campos ficam vazios (modo cadastro).
-
     def __init__(self, parent=None, filme=None):
         super().__init__(parent)
-
         self.filme_editado = filme
 
         titulo_janela = "Editar filme" if filme else "Cadastrar novo filme"
@@ -200,14 +213,10 @@ class FilmeDialog(QDialog):
             "estoque": self.campo_estoque.value(),
         }
 
-# DIALOG DE CADASTRO/EDICAO DE CLIENTE
 
 class ClienteDialog(QDialog):
-    # Janela de dialogo (modal) para cadastrar ou editar um cliente. Segue o mesmo padrao do FilmeDialog.
-
     def __init__(self, parent=None, cliente=None):
         super().__init__(parent)
-
         self.cliente_editado = cliente
 
         titulo_janela = "Editar cliente" if cliente else "Cadastrar novo cliente"
@@ -261,14 +270,10 @@ class ClienteDialog(QDialog):
             "email": self.campo_email.text().strip(),
         }
 
-# DIALOG DE DEVOLUCAO
 
 class DevolucaoDialog(QDialog):
-    # Dialog que mostra os dias de atraso e a multa antes de confirmar a devolucao.
-
     def __init__(self, locacao, parent=None):
         super().__init__(parent)
-
         self.locacao = locacao
         self.setWindowTitle("Confirmar devolucao")
         self.setMinimumWidth(300)
@@ -297,14 +302,11 @@ class DevolucaoDialog(QDialog):
         layout_principal.addWidget(self.botoes)
         self.setLayout(layout_principal)
 
-# JANELA ADICIONAL - DETALHES DO FILME
+# JANELAS AUXILIARES
 
 class DetalhesJanela(QWidget):
-    # Janela adicional: uma janela separada (nao e um dialog modal) que mostra os detalhes completos de um filme selecionado na tabela. Pode ficar aberta ao mesmo tempo que a janela principal.
-
     def __init__(self, filme):
         super().__init__()
-
         self.setWindowTitle(f"Detalhes - {filme.titulo}")
         self.setMinimumWidth(300)
 
@@ -336,20 +338,14 @@ class DetalhesJanela(QWidget):
         layout.addWidget(botao_fechar)
         self.setLayout(layout)
 
-# JANELA ADICIONAL - CADASTRO DE CLIENTES
 
 class ClientesWindow(QMainWindow):
-    # Janela adicional que gerencia o cadastro de clientes da locadora.
-    # Recebe a MESMA lista de clientes usada pela janela de locacao, entao mudancas aqui aparecem la tambem sem precisar de sinal nenhum - o sinal abaixo serve so para quem quiser reagir na hora.
-
     clientes_atualizados = Signal()
 
     def __init__(self, clientes, parent=None):
         super().__init__(parent)
-
         self.setWindowTitle("Locadora - Cadastro de Clientes")
         self.resize(560, 420)
-
         self.clientes = clientes
 
         self._montar_tabela()
@@ -373,7 +369,6 @@ class ClientesWindow(QMainWindow):
 
     def _montar_menu(self):
         menu = self.menuBar()
-
         menu_clientes = menu.addMenu("&Clientes")
         self.acao_novo = QAction("Novo cliente...", self)
         self.acao_novo.setShortcut(QKeySequence.New)
@@ -398,7 +393,6 @@ class ClientesWindow(QMainWindow):
         barra = QToolBar("Ferramentas de clientes")
         barra.setMovable(False)
         self.addToolBar(barra)
-
         barra.addAction(self.acao_novo)
         barra.addAction(self.acao_editar)
         barra.addAction(self.acao_excluir)
@@ -496,34 +490,12 @@ class ClientesWindow(QMainWindow):
             self._atualizar_estado_botoes()
             self.statusBar().showMessage("Cliente excluido.", 4000)
 
-    def keyPressEvent(self, evento):
-        if evento.key() == Qt.Key_Delete:
-            self.excluir_cliente()
-        else:
-            super().keyPressEvent(evento)
-
-    def closeEvent(self, evento):
-        resposta = QMessageBox.question(
-            self, "Fechar",
-            "Deseja realmente fechar o cadastro de clientes?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if resposta == QMessageBox.Yes:
-            evento.accept()
-        else:
-            evento.ignore()
-
-# JANELA ADICIONAL - ALUGUEL E DEVOLUCAO
 
 class LocacaoWindow(QMainWindow):
-    # Janela adicional para registrar alugueis e devolucoes.
-    # Recebe as MESMAS listas de filmes e clientes usadas pelo catalogo e pela janela de clientes, entao alugar um filme aqui ja desconta do estoque que aparece na tabela do catalogo.
-
     locacao_alterada = Signal()
 
     def __init__(self, filmes, clientes, parent=None):
         super().__init__(parent)
-
         self.setWindowTitle("Locadora - Aluguel e Devolucao")
         self.resize(700, 460)
 
@@ -560,7 +532,6 @@ class LocacaoWindow(QMainWindow):
 
     def _montar_menu(self):
         menu = self.menuBar()
-
         menu_locacao = menu.addMenu("&Locacao")
         self.acao_alugar = QAction("Registrar aluguel", self)
         self.acao_alugar.triggered.connect(self.registrar_locacao)
@@ -584,7 +555,6 @@ class LocacaoWindow(QMainWindow):
         barra = QToolBar("Ferramentas de locacao")
         barra.setMovable(False)
         self.addToolBar(barra)
-
         barra.addAction(self.acao_alugar)
         barra.addAction(self.acao_devolver)
 
@@ -698,18 +668,6 @@ class LocacaoWindow(QMainWindow):
             self.locacao_alterada.emit()
             self.statusBar().showMessage("Devolucao registrada.", 4000)
 
-    def closeEvent(self, evento):
-        ativas = sum(1 for l in self.locacoes if l.esta_ativa)
-        if ativas > 0:
-            resposta = QMessageBox.question(
-                self, "Locacoes em aberto",
-                f"Existem {ativas} locacao(oes) ativa(s). Fechar mesmo assim?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            )
-            if resposta != QMessageBox.Yes:
-                evento.ignore()
-                return
-        evento.accept()
 
 # JANELA PRINCIPAL
 
@@ -720,10 +678,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Locadora de Filmes - Catalogo")
         self.resize(760, 480)
 
-        self.filmes = self._carregar_filmes_exemplo()
+        # Configuração do Pool de Threads do Qt
+        self.threadpool = QThreadPool.globalInstance()
 
+        self.filmes = []
         self.janelas_detalhes_abertas = []
-
         self.clientes = []
         self.janela_clientes = None
         self.janela_locacao = None
@@ -734,15 +693,36 @@ class MainWindow(QMainWindow):
         self._montar_barra_status()
         self._montar_layout_central()
 
-        self._preencher_tabela()
         self._atualizar_estado_botoes()
+        
+        # Carrega dados em paralelo via Threading
+        self.carregar_filmes_em_paralelo()
 
-    def _carregar_filmes_exemplo(self):
-        return [
-            Filme("De Volta para o Futuro", "Robert Zemeckis", 1985, "Ficcao Cientifica", 116, 3),
-            Filme("O Iluminado", "Stanley Kubrick", 1980, "Terror", 146, 2),
-            Filme("Coringa", "Todd Phillips", 2019, "Drama", 122, 5),
-        ]
+    def carregar_filmes_em_paralelo(self):
+        """Dispara a execução paralela via QRunnable + QThreadPool."""
+        self.statusBar().showMessage("Carregando filmes em segundo plano...")
+        self.botao_carregar.setEnabled(False)
+
+        worker = CarregarFilmesWorker()
+        worker.signals.result.connect(self._ao_receber_filmes)
+        worker.signals.error.connect(self._ao_erro_carregamento)
+        worker.signals.finished.connect(self._ao_finalizar_carregamento)
+
+        self.threadpool.start(worker)
+
+    def _ao_receber_filmes(self, filmes_carregados):
+        """Slot para receber o resultado retornado pela thread."""
+        self.filmes = filmes_carregados
+        self._preencher_tabela()
+
+    def _ao_erro_carregamento(self, mensagem_erro):
+        """Slot acionado em caso de exceção na thread."""
+        QMessageBox.critical(self, "Erro", f"Erro ao carregar dados: {mensagem_erro}")
+
+    def _ao_finalizar_carregamento(self):
+        """Slot acionado quando a thread conclui a execução."""
+        self.statusBar().showMessage("Filmes carregados com sucesso!", 4000)
+        self.botao_carregar.setEnabled(True)
 
     def _montar_tabela(self):
         self.tabela = QTableWidget()
@@ -826,16 +806,19 @@ class MainWindow(QMainWindow):
         self.botao_editar = QPushButton("Editar")
         self.botao_excluir = QPushButton("Excluir")
         self.botao_detalhes = QPushButton("Detalhes")
+        self.botao_carregar = QPushButton("Recarregar em Segundo Plano (Thread)")
 
         self.botao_novo.clicked.connect(self.cadastrar_filme)
         self.botao_editar.clicked.connect(self.editar_filme)
         self.botao_excluir.clicked.connect(self.excluir_filme)
         self.botao_detalhes.clicked.connect(self.abrir_detalhes)
+        self.botao_carregar.clicked.connect(self.carregar_filmes_em_paralelo)
 
         layout_botoes = QHBoxLayout()
         layout_botoes.addWidget(self.botao_novo)
         layout_botoes.addWidget(self.botao_editar)
         layout_botoes.addWidget(self.botao_excluir)
+        layout_botoes.addWidget(self.botao_carregar)
         layout_botoes.addStretch()
         layout_botoes.addWidget(self.botao_detalhes)
 
@@ -944,27 +927,8 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Sobre",
-            "Sistema de catalogo de filmes\nTrabalho de POO - PySide6",
+            "Sistema de catalogo de filmes\nTrabalho de POO - PySide6 com Threads",
         )
-
-    def keyPressEvent(self, evento):
-        if evento.key() == Qt.Key_Delete:
-            self.excluir_filme()
-        else:
-            super().keyPressEvent(evento)
-
-    def closeEvent(self, evento):
-        resposta = QMessageBox.question(
-            self,
-            "Sair",
-            "Tem certeza que deseja sair do sistema?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if resposta == QMessageBox.Yes:
-            evento.accept()
-        else:
-            evento.ignore()
 
 # EXECUCAO DO PROGRAMA
 
