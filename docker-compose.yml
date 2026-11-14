@@ -1,0 +1,18 @@
+# Banco de dados PostgreSQL da locadora rodando em um conteiner
+# Para subir: docker compose up -d
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: locadora_db
+    environment:
+      POSTGRES_DB: locadora
+      POSTGRES_USER: locadora
+      POSTGRES_PASSWORD: locadora123
+    ports:
+      - "5432:5432"
+    volumes:
+      - dados_locadora:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+volumes:
+  dados_locadora:

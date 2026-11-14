@@ -1,10 +1,10 @@
 import sys
 import csv
-import json
 import time
 import hashlib
 from datetime import date, timedelta
-from pathlib import Path
+
+import psycopg2
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
@@ -27,16 +27,6 @@ GENEROS = [
 COLUNAS_CLIENTE = ["Nome", "CPF", "Telefone", "Email"]
 COLUNAS_LOCACAO = ["Filme", "Cliente", "Retirada", "Prevista", "Status"]
 
-# Pasta onde ficam os arquivos de dados (criada automaticamente)
-PASTA_DADOS = Path(__file__).parent / "dados"
-ARQ_FILMES = PASTA_DADOS / "filmes.json"
-ARQ_CLIENTES = PASTA_DADOS / "clientes.csv"
-ARQ_LOCACOES = PASTA_DADOS / "locacoes.json"
-ARQ_USUARIOS = PASTA_DADOS / "usuarios.json"
-
-# Credenciais do admin criadas na primeira execucao
-ADMIN_PADRAO_USUARIO = "admin"
-ADMIN_PADRAO_SENHA = "admin123"
 
 # MODELOS
 
@@ -137,25 +127,6 @@ class Locacao:
         self.data_devolucao = date.today()
         self.filme.estoque += 1
 
-    def para_dict(self):
-        # Guarda so o titulo e o CPF; os objetos sao religados ao carregar
-        return {
-            "filme": self.filme.titulo,
-            "cliente_cpf": self.cliente.cpf,
-            "retirada": self.data_retirada.isoformat(),
-            "prevista": self.data_prevista_devolucao.isoformat(),
-            "devolucao": self.data_devolucao.isoformat() if self.data_devolucao else None,
-        }
-
-    @classmethod
-    def de_dict(cls, dados, filme, cliente):
-        locacao = cls(filme, cliente, date.fromisoformat(dados["prevista"]))
-        locacao.data_retirada = date.fromisoformat(dados["retirada"])
-        if dados["devolucao"]:
-            locacao.data_devolucao = date.fromisoformat(dados["devolucao"])
-        # Nao mexe no estoque aqui: ele ja foi salvo com o valor atual
-        return locacao
-
     def para_linha_tabela(self):
         status = "Ativa" if self.esta_ativa else "Devolvida"
         return [
@@ -193,71 +164,114 @@ class Sessao:
     def descricao(self):
         return "Administrador" if self.eh_admin else f"Cliente: {self.nome}"
 
-# PERSISTENCIA EM ARQUIVOS (SEM SGBD)
+# BANCO DE DADOS (PostgreSQL rodando em um conteiner Docker)
+
+# Dados de conexao. Se o banco estiver em outra maquina,
+# troque "localhost" pelo IP do computador que roda o Docker.
+DB_HOST = "localhost"
+DB_PORTA = 5432
+DB_NOME = "locadora"
+DB_USUARIO = "locadora"
+DB_SENHA = "locadora123"
+
+
+def conectar():
+    return psycopg2.connect(
+        host=DB_HOST, port=DB_PORTA, dbname=DB_NOME,
+        user=DB_USUARIO, password=DB_SENHA,
+    )
+
 
 class Repositorio:
-    # Filmes em JSON, clientes em CSV, locacoes em JSON, usuarios em JSON
-
-    @staticmethod
-    def salvar_filmes(filmes):
-        PASTA_DADOS.mkdir(exist_ok=True)
-        with open(ARQ_FILMES, "w", encoding="utf-8") as arquivo:
-            json.dump([f.para_dict() for f in filmes], arquivo, ensure_ascii=False, indent=2)
+    # Cada metodo abre uma conexao, faz o que precisa e fecha
 
     @staticmethod
     def carregar_filmes():
-        if not ARQ_FILMES.exists():
-            return []
-        with open(ARQ_FILMES, encoding="utf-8") as arquivo:
-            return [Filme(**dados) for dados in json.load(arquivo)]
-
-    @staticmethod
-    def salvar_clientes(clientes):
-        PASTA_DADOS.mkdir(exist_ok=True)
-        with open(ARQ_CLIENTES, "w", encoding="utf-8", newline="") as arquivo:
-            escritor = csv.DictWriter(arquivo, fieldnames=["nome", "cpf", "telefone", "email"])
-            escritor.writeheader()
-            for cliente in clientes:
-                escritor.writerow(cliente.para_dict())
+        conexao = conectar()
+        cursor = conexao.cursor()
+        cursor.execute("SELECT titulo, diretor, ano, genero, duracao_min, estoque FROM filmes ORDER BY titulo")
+        filmes = []
+        for linha in cursor.fetchall():
+            filmes.append(Filme(linha[0], linha[1], linha[2], linha[3], linha[4], linha[5]))
+        conexao.close()
+        return filmes
 
     @staticmethod
     def carregar_clientes():
-        if not ARQ_CLIENTES.exists():
-            return []
-        with open(ARQ_CLIENTES, encoding="utf-8", newline="") as arquivo:
-            return [Cliente(**linha) for linha in csv.DictReader(arquivo)]
-
-    @staticmethod
-    def salvar_locacoes(locacoes):
-        PASTA_DADOS.mkdir(exist_ok=True)
-        with open(ARQ_LOCACOES, "w", encoding="utf-8") as arquivo:
-            json.dump([l.para_dict() for l in locacoes], arquivo, ensure_ascii=False, indent=2)
+        conexao = conectar()
+        cursor = conexao.cursor()
+        cursor.execute("SELECT nome, cpf, telefone, email FROM clientes ORDER BY nome")
+        clientes = []
+        for linha in cursor.fetchall():
+            clientes.append(Cliente(linha[0], linha[1], linha[2], linha[3]))
+        conexao.close()
+        return clientes
 
     @staticmethod
     def carregar_locacoes(filmes, clientes):
-        if not ARQ_LOCACOES.exists():
-            return []
+        # O banco guarda so o titulo e o CPF; aqui religamos aos objetos
         filmes_por_titulo = {f.titulo: f for f in filmes}
         clientes_por_cpf = {c.cpf: c for c in clientes}
+
+        conexao = conectar()
+        cursor = conexao.cursor()
+        cursor.execute("SELECT filme_titulo, cliente_cpf, retirada, prevista, devolucao FROM locacoes ORDER BY id")
         locacoes = []
-        with open(ARQ_LOCACOES, encoding="utf-8") as arquivo:
-            for dados in json.load(arquivo):
-                filme = filmes_por_titulo.get(dados["filme"])
-                cliente = clientes_por_cpf.get(dados["cliente_cpf"])
-                # Ignora locacao orfa (filme ou cliente que nao existe mais)
-                if filme and cliente:
-                    locacoes.append(Locacao.de_dict(dados, filme, cliente))
+        for linha in cursor.fetchall():
+            filme = filmes_por_titulo.get(linha[0])
+            cliente = clientes_por_cpf.get(linha[1])
+            if filme and cliente:
+                locacao = Locacao(filme, cliente, linha[3])
+                locacao.data_retirada = linha[2]
+                locacao.data_devolucao = linha[4]
+                locacoes.append(locacao)
+        conexao.close()
         return locacoes
 
     @staticmethod
-    def carregar_usuarios():
-        # Na primeira execucao cria o arquivo com o admin padrao
-        if not ARQ_USUARIOS.exists():
-            PASTA_DADOS.mkdir(exist_ok=True)
-            with open(ARQ_USUARIOS, "w", encoding="utf-8") as arquivo:
-                json.dump({ADMIN_PADRAO_USUARIO: gerar_hash(ADMIN_PADRAO_SENHA)}, arquivo, indent=2)
-        with open(ARQ_USUARIOS, encoding="utf-8") as arquivo:
-            return json.load(arquivo)
+    def buscar_senha_admin(usuario):
+        # Retorna o hash da senha do usuario, ou None se ele nao existir
+        conexao = conectar()
+        cursor = conexao.cursor()
+        cursor.execute("SELECT senha_hash FROM usuarios WHERE usuario = %s", (usuario,))
+        linha = cursor.fetchone()
+        conexao.close()
+        if linha:
+            return linha[0]
+        return None
+
+    @staticmethod
+    def salvar_tudo(filmes, clientes, locacoes):
+        # Apaga e grava tudo de novo. Como e uma transacao so,
+        # se der erro no meio o commit nao acontece e nada se perde.
+        conexao = conectar()
+        cursor = conexao.cursor()
+        try:
+            cursor.execute("DELETE FROM locacoes")
+            cursor.execute("DELETE FROM clientes")
+            cursor.execute("DELETE FROM filmes")
+
+            for f in filmes:
+                cursor.execute(
+                    "INSERT INTO filmes (titulo, diretor, ano, genero, duracao_min, estoque) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (f.titulo, f.diretor, f.ano, f.genero, f.duracao_min, f.estoque),
+                )
+            for c in clientes:
+                cursor.execute(
+                    "INSERT INTO clientes (nome, cpf, telefone, email) VALUES (%s, %s, %s, %s)",
+                    (c.nome, c.cpf, c.telefone, c.email),
+                )
+            for l in locacoes:
+                cursor.execute(
+                    "INSERT INTO locacoes (filme_titulo, cliente_cpf, retirada, prevista, devolucao) VALUES (%s, %s, %s, %s, %s)",
+                    (l.filme.titulo, l.cliente.cpf, l.data_retirada, l.data_prevista_devolucao, l.data_devolucao),
+                )
+            conexao.commit()
+        except Exception:
+            conexao.rollback()
+            raise
+        finally:
+            conexao.close()
 
 # ESTRUTURA PARA THREADING (QRunnable + QThreadPool)
 
@@ -269,7 +283,7 @@ class WorkerSignals(QObject):
 
 
 class CarregarDadosWorker(QRunnable):
-    # Tarefa em segundo plano que le os arquivos sem travar a interface
+    # Tarefa em segundo plano que le o banco de dados sem travar a interface
     def __init__(self):
         super().__init__()
         self.signals = WorkerSignals()
@@ -364,10 +378,14 @@ class LoginDialog(QDialog):
             self._login_cliente()
 
     def _login_admin(self):
-        usuarios = Repositorio.carregar_usuarios()
         usuario = self.campo_usuario.text().strip()
         senha_hash = gerar_hash(self.campo_senha.text())
-        if usuarios.get(usuario) == senha_hash:
+        try:
+            senha_salva = Repositorio.buscar_senha_admin(usuario)
+        except psycopg2.Error as e:
+            QMessageBox.critical(self, "Erro de conexao", f"Nao foi possivel acessar o banco: {e}")
+            return
+        if senha_salva == senha_hash:
             self.sessao = Sessao("admin", usuario)
             self.accept()
         else:
@@ -376,8 +394,13 @@ class LoginDialog(QDialog):
 
     def _login_cliente(self):
         cpf_digitado = somente_digitos(self.campo_usuario.text())
+        try:
+            clientes = Repositorio.carregar_clientes() if cpf_digitado else []
+        except psycopg2.Error as e:
+            QMessageBox.critical(self, "Erro de conexao", f"Nao foi possivel acessar o banco: {e}")
+            return
         if cpf_digitado:
-            for cliente in Repositorio.carregar_clientes():
+            for cliente in clientes:
                 if somente_digitos(cliente.cpf) == cpf_digitado:
                     self.sessao = Sessao("cliente", cliente.nome, cliente.cpf)
                     self.accept()
@@ -1067,11 +1090,9 @@ class MainWindow(QMainWindow):
 
     def salvar_tudo(self):
         try:
-            Repositorio.salvar_filmes(self.filmes)
-            Repositorio.salvar_clientes(self.clientes)
-            Repositorio.salvar_locacoes(self.locacoes)
-        except OSError as e:
-            QMessageBox.critical(self, "Erro", f"Nao foi possivel salvar os arquivos: {e}")
+            Repositorio.salvar_tudo(self.filmes, self.clientes, self.locacoes)
+        except psycopg2.Error as e:
+            QMessageBox.critical(self, "Erro", f"Nao foi possivel salvar no banco de dados: {e}")
 
     def closeEvent(self, event):
         # Garante que nada se perde ao fechar e que as janelas filhas fecham junto
@@ -1429,13 +1450,24 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Sobre",
-            "Sistema de catalogo de filmes\nTrabalho de POO - PySide6 com Threads e Arquivos",
+            "Sistema de catalogo de filmes\nTrabalho de POO - PySide6 com Threads, Arquivos e PostgreSQL (Docker)",
         )
 
 # EXECUCAO DO PROGRAMA
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    # Testa a conexao antes de abrir o login
+    try:
+        conectar().close()
+    except psycopg2.Error:
+        QMessageBox.critical(
+            None, "Erro",
+            "Nao foi possivel conectar ao banco de dados.\n"
+            "Verifique se o conteiner esta rodando (docker compose up -d).",
+        )
+        sys.exit(1)
 
     # A tela de login aparece antes da janela principal
     login = LoginDialog()

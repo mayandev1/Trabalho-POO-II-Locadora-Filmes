@@ -1,0 +1,27 @@
+CHANGELOG - Locadora de Filmes
+
+[Banco de dados com PostgreSQL e Docker]
+
+Adicionado
+- Banco de dados PostgreSQL rodando em um conteiner Docker (docker-compose.yml).
+- Script db/init.sql que cria as tabelas filmes, clientes, locacoes e usuarios
+  e o usuario admin padrao (admin / admin123).
+- Arquivo requirements.txt com as dependencias (PySide6 e psycopg2-binary).
+- Arquivo ARMAZENAMENTO.md com a justificativa dos tipos de armazenamento
+  e as instrucoes para rodar o banco.
+- Mensagem de erro ao abrir o sistema quando o banco nao esta disponivel.
+
+Alterado
+- Filmes, clientes, locacoes e usuarios passaram a ser salvos no banco de dados
+  em vez dos arquivos JSON/CSV da pasta dados/.
+- O salvamento e feito em uma unica transacao (commit/rollback).
+- O login do administrador agora consulta a tabela usuarios no banco.
+- O carregamento em segundo plano (QRunnable) agora le os dados do banco.
+
+Mantido
+- Exportar catalogo (CSV), exportar relatorio (TXT) e importar filmes (CSV)
+  continuam usando arquivos.
+
+Removido
+- Leitura e gravacao dos arquivos dados/filmes.json, dados/clientes.csv,
+  dados/locacoes.json e dados/usuarios.json.
