@@ -1,10 +1,9 @@
 import sys
 import csv
 import time
-import hashlib
 from datetime import date, timedelta
 
-import psycopg2
+import requests
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
@@ -139,11 +138,6 @@ class Locacao:
 
 # AUTENTICACAO
 
-def gerar_hash(texto):
-    # Guarda so o hash da senha, nunca a senha em texto puro
-    return hashlib.sha256(texto.encode("utf-8")).hexdigest()
-
-
 def somente_digitos(texto):
     # Permite comparar CPF com ou sem pontuacao
     return "".join(c for c in texto if c.isdigit())
@@ -164,114 +158,85 @@ class Sessao:
     def descricao(self):
         return "Administrador" if self.eh_admin else f"Cliente: {self.nome}"
 
-# BANCO DE DADOS (PostgreSQL rodando em um conteiner Docker)
+# COMUNICACAO COM A API (Flask) VIA REDE
 
-# Dados de conexao. Se o banco estiver em outra maquina,
+# Endereco da API. Se ela estiver em outra maquina,
 # troque "localhost" pelo IP do computador que roda o Docker.
-DB_HOST = "localhost"
-DB_PORTA = 5432
-DB_NOME = "locadora"
-DB_USUARIO = "locadora"
-DB_SENHA = "locadora123"
-
-
-def conectar():
-    return psycopg2.connect(
-        host=DB_HOST, port=DB_PORTA, dbname=DB_NOME,
-        user=DB_USUARIO, password=DB_SENHA,
-    )
+URL_API = "http://localhost:5000"
 
 
 class Repositorio:
-    # Cada metodo abre uma conexao, faz o que precisa e fecha
+    # A interface nao acessa o banco direto: cada metodo faz uma
+    # requisicao HTTP para a API, e a API conversa com o PostgreSQL.
+
+    @staticmethod
+    def testar_conexao():
+        resposta = requests.get(f"{URL_API}/status", timeout=5)
+        resposta.raise_for_status()
 
     @staticmethod
     def carregar_filmes():
-        conexao = conectar()
-        cursor = conexao.cursor()
-        cursor.execute("SELECT titulo, diretor, ano, genero, duracao_min, estoque FROM filmes ORDER BY titulo")
+        resposta = requests.get(f"{URL_API}/filmes", timeout=5)
+        resposta.raise_for_status()
         filmes = []
-        for linha in cursor.fetchall():
-            filmes.append(Filme(linha[0], linha[1], linha[2], linha[3], linha[4], linha[5]))
-        conexao.close()
+        for f in resposta.json():
+            filmes.append(Filme(f["titulo"], f["diretor"], f["ano"], f["genero"], f["duracao_min"], f["estoque"]))
         return filmes
 
     @staticmethod
     def carregar_clientes():
-        conexao = conectar()
-        cursor = conexao.cursor()
-        cursor.execute("SELECT nome, cpf, telefone, email FROM clientes ORDER BY nome")
+        resposta = requests.get(f"{URL_API}/clientes", timeout=5)
+        resposta.raise_for_status()
         clientes = []
-        for linha in cursor.fetchall():
-            clientes.append(Cliente(linha[0], linha[1], linha[2], linha[3]))
-        conexao.close()
+        for c in resposta.json():
+            clientes.append(Cliente(c["nome"], c["cpf"], c["telefone"], c["email"]))
         return clientes
 
     @staticmethod
     def carregar_locacoes(filmes, clientes):
-        # O banco guarda so o titulo e o CPF; aqui religamos aos objetos
+        # A API manda so o titulo e o CPF; aqui religamos aos objetos
         filmes_por_titulo = {f.titulo: f for f in filmes}
         clientes_por_cpf = {c.cpf: c for c in clientes}
 
-        conexao = conectar()
-        cursor = conexao.cursor()
-        cursor.execute("SELECT filme_titulo, cliente_cpf, retirada, prevista, devolucao FROM locacoes ORDER BY id")
+        resposta = requests.get(f"{URL_API}/locacoes", timeout=5)
+        resposta.raise_for_status()
         locacoes = []
-        for linha in cursor.fetchall():
-            filme = filmes_por_titulo.get(linha[0])
-            cliente = clientes_por_cpf.get(linha[1])
+        for l in resposta.json():
+            filme = filmes_por_titulo.get(l["filme"])
+            cliente = clientes_por_cpf.get(l["cliente_cpf"])
             if filme and cliente:
-                locacao = Locacao(filme, cliente, linha[3])
-                locacao.data_retirada = linha[2]
-                locacao.data_devolucao = linha[4]
+                locacao = Locacao(filme, cliente, date.fromisoformat(l["prevista"]))
+                locacao.data_retirada = date.fromisoformat(l["retirada"])
+                if l["devolucao"]:
+                    locacao.data_devolucao = date.fromisoformat(l["devolucao"])
                 locacoes.append(locacao)
-        conexao.close()
         return locacoes
 
     @staticmethod
-    def buscar_senha_admin(usuario):
-        # Retorna o hash da senha do usuario, ou None se ele nao existir
-        conexao = conectar()
-        cursor = conexao.cursor()
-        cursor.execute("SELECT senha_hash FROM usuarios WHERE usuario = %s", (usuario,))
-        linha = cursor.fetchone()
-        conexao.close()
-        if linha:
-            return linha[0]
-        return None
+    def login_admin(usuario, senha):
+        # A API confere a senha e responde se o login e valido
+        resposta = requests.post(f"{URL_API}/login", json={"usuario": usuario, "senha": senha}, timeout=5)
+        return resposta.status_code == 200
 
     @staticmethod
     def salvar_tudo(filmes, clientes, locacoes):
-        # Apaga e grava tudo de novo. Como e uma transacao so,
-        # se der erro no meio o commit nao acontece e nada se perde.
-        conexao = conectar()
-        cursor = conexao.cursor()
-        try:
-            cursor.execute("DELETE FROM locacoes")
-            cursor.execute("DELETE FROM clientes")
-            cursor.execute("DELETE FROM filmes")
-
-            for f in filmes:
-                cursor.execute(
-                    "INSERT INTO filmes (titulo, diretor, ano, genero, duracao_min, estoque) VALUES (%s, %s, %s, %s, %s, %s)",
-                    (f.titulo, f.diretor, f.ano, f.genero, f.duracao_min, f.estoque),
-                )
-            for c in clientes:
-                cursor.execute(
-                    "INSERT INTO clientes (nome, cpf, telefone, email) VALUES (%s, %s, %s, %s)",
-                    (c.nome, c.cpf, c.telefone, c.email),
-                )
-            for l in locacoes:
-                cursor.execute(
-                    "INSERT INTO locacoes (filme_titulo, cliente_cpf, retirada, prevista, devolucao) VALUES (%s, %s, %s, %s, %s)",
-                    (l.filme.titulo, l.cliente.cpf, l.data_retirada, l.data_prevista_devolucao, l.data_devolucao),
-                )
-            conexao.commit()
-        except Exception:
-            conexao.rollback()
-            raise
-        finally:
-            conexao.close()
+        # Manda tudo para a API em JSON; ela grava no banco em uma transacao
+        dados = {
+            "filmes": [f.para_dict() for f in filmes],
+            "clientes": [c.para_dict() for c in clientes],
+            "locacoes": [
+                {
+                    "filme": l.filme.titulo,
+                    "cliente_cpf": l.cliente.cpf,
+                    "retirada": l.data_retirada.isoformat(),
+                    "prevista": l.data_prevista_devolucao.isoformat(),
+                    "devolucao": l.data_devolucao.isoformat() if l.data_devolucao else None,
+                }
+                for l in locacoes
+            ],
+        }
+        resposta = requests.put(f"{URL_API}/dados", json=dados, timeout=10)
+        resposta.raise_for_status()
 
 # ESTRUTURA PARA THREADING (QRunnable + QThreadPool)
 
@@ -379,13 +344,12 @@ class LoginDialog(QDialog):
 
     def _login_admin(self):
         usuario = self.campo_usuario.text().strip()
-        senha_hash = gerar_hash(self.campo_senha.text())
         try:
-            senha_salva = Repositorio.buscar_senha_admin(usuario)
-        except psycopg2.Error as e:
-            QMessageBox.critical(self, "Erro de conexao", f"Nao foi possivel acessar o banco: {e}")
+            login_valido = Repositorio.login_admin(usuario, self.campo_senha.text())
+        except requests.RequestException as e:
+            QMessageBox.critical(self, "Erro de conexao", f"Nao foi possivel acessar a API: {e}")
             return
-        if senha_salva == senha_hash:
+        if login_valido:
             self.sessao = Sessao("admin", usuario)
             self.accept()
         else:
@@ -396,8 +360,8 @@ class LoginDialog(QDialog):
         cpf_digitado = somente_digitos(self.campo_usuario.text())
         try:
             clientes = Repositorio.carregar_clientes() if cpf_digitado else []
-        except psycopg2.Error as e:
-            QMessageBox.critical(self, "Erro de conexao", f"Nao foi possivel acessar o banco: {e}")
+        except requests.RequestException as e:
+            QMessageBox.critical(self, "Erro de conexao", f"Nao foi possivel acessar a API: {e}")
             return
         if cpf_digitado:
             for cliente in clientes:
@@ -1091,8 +1055,8 @@ class MainWindow(QMainWindow):
     def salvar_tudo(self):
         try:
             Repositorio.salvar_tudo(self.filmes, self.clientes, self.locacoes)
-        except psycopg2.Error as e:
-            QMessageBox.critical(self, "Erro", f"Nao foi possivel salvar no banco de dados: {e}")
+        except requests.RequestException as e:
+            QMessageBox.critical(self, "Erro", f"Nao foi possivel salvar os dados na API: {e}")
 
     def closeEvent(self, event):
         # Garante que nada se perde ao fechar e que as janelas filhas fecham junto
@@ -1450,7 +1414,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Sobre",
-            "Sistema de catalogo de filmes\nTrabalho de POO - PySide6 com Threads, Arquivos e PostgreSQL (Docker)",
+            "Sistema de catalogo de filmes\nTrabalho de POO - PySide6 com Threads, Arquivos, API Flask e PostgreSQL (Docker)",
         )
 
 # EXECUCAO DO PROGRAMA
@@ -1460,12 +1424,12 @@ if __name__ == "__main__":
 
     # Testa a conexao antes de abrir o login
     try:
-        conectar().close()
-    except psycopg2.Error:
+        Repositorio.testar_conexao()
+    except requests.RequestException:
         QMessageBox.critical(
             None, "Erro",
-            "Nao foi possivel conectar ao banco de dados.\n"
-            "Verifique se o conteiner esta rodando (docker compose up -d).",
+            "Nao foi possivel conectar a API.\n"
+            "Verifique se os conteineres estao rodando (docker compose up -d --build).",
         )
         sys.exit(1)
 

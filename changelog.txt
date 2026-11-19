@@ -1,12 +1,42 @@
 CHANGELOG - Locadora de Filmes
 
-[Banco de dados com PostgreSQL e Docker]
+
+[Entrega parcial 2 - 20/11/2026]
+Comunicacao via rede com API Flask
+
+Adicionado
+- API em Flask (api/app.py) que fica entre a interface e o banco de dados.
+  Rotas:
+    GET  /status    - verifica se a API e o banco estao no ar
+    GET  /filmes    - lista os filmes
+    GET  /clientes  - lista os clientes
+    GET  /locacoes  - lista as locacoes
+    POST /login     - confere usuario e senha do administrador
+    PUT  /dados     - salva filmes, clientes e locacoes no banco
+- Dockerfile da API (api/Dockerfile) e api/requirements.txt.
+- Servico "api" no docker-compose.yml. Agora o comando
+  "docker compose up -d --build" sobe o banco e a API, cada um em um conteiner.
+
+Alterado
+- A interface (locadora.py) nao acessa mais o banco direto. A classe Repositorio
+  agora faz requisicoes HTTP para a API usando a biblioteca requests.
+- A conferencia da senha do admin passou a ser feita pela API.
+- O endereco usado pela interface agora e URL_API (http://localhost:5000).
+  Para usar em outra maquina, basta trocar localhost pelo IP do servidor.
+- O banco nao fica mais exposto na porta 5432; so a API acessa ele,
+  pela rede interna do Docker.
+- requirements.txt da interface: saiu psycopg2-binary, entrou requests.
+- ARMAZENAMENTO.md atualizado com a parte da API.
+
+
+[Entrega parcial 1 - 13/11/2026]
+Banco de dados com PostgreSQL e Docker
 
 Adicionado
 - Banco de dados PostgreSQL rodando em um conteiner Docker (docker-compose.yml).
 - Script db/init.sql que cria as tabelas filmes, clientes, locacoes e usuarios
   e o usuario admin padrao (admin / admin123).
-- Arquivo requirements.txt com as dependencias (PySide6 e psycopg2-binary).
+- Arquivo requirements.txt com as dependencias.
 - Arquivo ARMAZENAMENTO.md com a justificativa dos tipos de armazenamento
   e as instrucoes para rodar o banco.
 - Mensagem de erro ao abrir o sistema quando o banco nao esta disponivel.
